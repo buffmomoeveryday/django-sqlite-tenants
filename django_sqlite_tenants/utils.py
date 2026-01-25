@@ -64,3 +64,23 @@ def get_domain_model():
         raise ImproperlyConfigured(
             f"DOMAIN_MODEL '{model_path}' has not been installed"
         )
+
+
+def rename_tenant_database(old_slug, new_slug):
+    """
+    Rename a tenant's SQLite database file when the slug changes.
+    """
+    import os
+    from django.conf import settings
+    from django_sqlite_tenants.conf import conf
+
+    # Ensure the tenants directory exists
+    tenant_dir = os.path.join(settings.BASE_DIR, conf.TENANTS_DB_FOLDER)
+
+    old_db_path = os.path.join(tenant_dir, f"{old_slug}.sqlite3")
+    new_db_path = os.path.join(tenant_dir, f"{new_slug}.sqlite3")
+
+    if os.path.exists(old_db_path):
+        if os.path.exists(new_db_path):
+            raise FileExistsError(f"Database file for slug '{new_slug}' already exists")
+        os.rename(old_db_path, new_db_path)

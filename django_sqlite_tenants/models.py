@@ -42,9 +42,10 @@ class DomainMixin(models.Model):
     def save(self, *args, **kwargs):
         # Ensure only one primary domain per tenant
         if self.is_primary:
-            self.__class__.objects.filter(tenant=self.tenant, is_primary=True).exclude(
-                id=self.pk
-            ).update(is_primary=False)
+            self.__class__.objects.filter(  # type:ignore
+                tenant=self.tenant,
+                is_primary=True,
+            ).exclude(id=self.pk).update(is_primary=False)
         super().save(*args, **kwargs)
 
 
@@ -89,6 +90,8 @@ class TenantMixin(models.Model):
         # Initialize previous tenant stack for context manager
         if not hasattr(self, "_previous_tenant"):
             self._previous_tenant = []
+        # Store original slug for tracking changes
+        self._original_slug = self.slug
 
     def __enter__(self):
         """
@@ -122,6 +125,27 @@ class TenantMixin(models.Model):
 
         set_current_tenant(self.slug)
 
+    def save(self, *args, **kwargs):
+        """
+        Override save method to handle slug renaming.
+        """
+        # Check if slug has changed
+        slug_changed = False
+        if self.pk:
+            slug_changed = self.slug != self._original_slug
+
+        # Call parent class save method
+        super().save(*args, **kwargs)
+
+        # If slug changed and it's not a new instance, rename the database file
+        if slug_changed:
+            from django_sqlite_tenants.utils import rename_tenant_database
+
+            rename_tenant_database(self._original_slug, self.slug)
+
+        # Update original slug for next save
+        self._original_slug = self.slug
+
     @classmethod
     def deactivate(cls):
         """
@@ -132,5 +156,4 @@ class TenantMixin(models.Model):
             # or simpler
             Tenant.deactivate()
         """
-
         set_current_tenant(None)

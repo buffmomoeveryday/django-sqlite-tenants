@@ -5,11 +5,11 @@ from django.dispatch import receiver
 from django.conf import settings
 from django.core.management import call_command
 from django.db import connections
-from django_sqlite_tenants.models import TenantMixin
+from django_sqlite_tenants.utils import get_tenant_model
 from django_sqlite_tenants.conf import conf
+from django.db.utils import DEFAULT_DB_ALIAS
 
 
-@receiver(post_save, sender=TenantMixin)
 def auto_run_migrations_on_tenant_creation(sender, instance, created, **kwargs):
     """
     Automatically runs migrations when a new tenant is created if AUTO_RUN_MIGRATION is True.
@@ -28,35 +28,26 @@ def auto_run_migrations_on_tenant_creation(sender, instance, created, **kwargs):
 
     db_path = os.path.join(tenant_dir, f"{slug}.sqlite3")
 
-    # Dynamically register the database connection
-    settings.DATABASES[slug] = {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": db_path,
-        "TIME_ZONE": settings.TIME_ZONE,
-        "ATOMIC_REQUESTS": False,
-        "AUTOCOMMIT": True,
-        "CONN_MAX_AGE": 0,
-        "CONN_HEALTH_CHECKS": False,
-        "OPTIONS": {
-            "transaction_mode": "IMMEDIATE",
-            "timeout": 5,
-            "init_command": """
-            PRAGMA journal_mode=WAL;
-            PRAGMA synchronous=NORMAL;
-            PRAGMA mmap_size=134217728;
-            PRAGMA journal_size_limit=27103364;
-            PRAGMA cache_size=2000;
-        """,
-        },
-    }
+    # Dynamic Database Configuration - copy default config to inherit settings
+    tenant_db_config = settings.DATABASES[DEFAULT_DB_ALIAS].copy()
+    tenant_db_config["NAME"] = db_path
+    tenant_db_config["ENGINE"] = "django.db.backends.sqlite3"  # Force SQLite
+
+    # Inject into settings
+    settings.DATABASES[slug] = tenant_db_config
 
     try:
         # Run migrations for the new tenant
         call_command("migrate", database=slug, interactive=False)
+        logging.info(f"Successfully migrated tenant {slug}")
     except Exception as e:
         # Handle any errors during migration
         logging.error(f"Error migrating tenant {slug}: {e}")
+        # Optionally, you could delete the tenant record here if migration fails
+        # instance.delete()
     finally:
         # Cleanup: Close the connection and remove from settings
         if slug in connections:
             connections[slug].close()
+        if slug in settings.DATABASES:
+            del settings.DATABASES[slug]
