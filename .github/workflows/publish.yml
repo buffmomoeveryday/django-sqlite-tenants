@@ -24,8 +24,8 @@ on:
       - '.idea/**'
 
 jobs:
-  setup:
-    name: Run Setup
+  test:
+    name: Run Tests
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     
@@ -44,12 +44,18 @@ jobs:
     - name: Sync dependencies
       run: uv sync
     
+    - name: Run tests
+      run: uv run python -m pytest django_sqlite_tenants/tests.py -v
 
   publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
+    environment: django-sqlite-tenants
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    needs: setup
+    needs: test
+    permissions:
+      contents: read
+      id-token: write
     
     steps:
     - name: Checkout code
@@ -76,6 +82,8 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     needs: publish
+    permissions:
+      contents: write
     
     steps:
     - name: Checkout code
@@ -89,4 +97,4 @@ jobs:
         draft: false
         prerelease: false
       env:
-        GITHUB_TOKEN: ${{ secrets.TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
