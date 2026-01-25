@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+</head>
+Showing = {{request.tenant.name }}
+<br>
+<body>
+    Blogs <br/>
+    {% for blog in blogs %}
+       <a href="{% url 'blog_detail' blog.pk %}">{{blog.name}} <br/>
+    {% endfor %}
+        
+</body>
+</html>

@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{blog.name}}</title>
+</head>
+<body>
+    <h1>{{blog.name}}</h1>
+    <p>{{blog.post}}</p>
+
+    <a href="{% url 'blog_list_view' %}">Back to Blog List</a>
+    <a href="{% url 'blog_create' %}">Create New Blog</a>
+    <a href="{% url 'blog_edit' blog.pk %}">Edit Blog</a>
+</body>
+</html>
