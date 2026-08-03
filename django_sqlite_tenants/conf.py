@@ -1,3 +1,4 @@
+from django_sqlite_tenants.enums import TenantRoutingMode
 from django.conf import settings
 
 
@@ -7,7 +8,7 @@ class AppSettings:
             "TENANT_MODEL": None,
             "DOMAIN_MODEL": None,
             "TENANT_URLCONF": None,
-            "TENANT_ROUTING_MODE": "DOMAIN",
+            "TENANT_ROUTING_MODE": TenantRoutingMode.DOMAIN,
             "TENANT_SUBFOLDER_PREFIX": "r",
             "TENANT_BASE_DOMAIN": "localhost",
             "TENANTS_DB_FOLDER": "tenants",

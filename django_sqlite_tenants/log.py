@@ -10,7 +10,7 @@ class TenantContextFilter(logging.Filter):
     def filter(self, record):
         tenant = get_current_tenant()
         record.tenant_slug = tenant.slug if tenant else None
-        record.schema_name = record.tenant_slug  # Backward compatibility
+        record.schema_name = record.tenant_slug
         record.domain = (
             tenant.get_primary_domain().domain
             if tenant and tenant.get_primary_domain()

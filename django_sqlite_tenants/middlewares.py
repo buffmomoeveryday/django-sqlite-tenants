@@ -5,6 +5,8 @@ from django.http import HttpResponse, HttpRequest, Http404
 from django.urls import set_urlconf, clear_url_caches, set_script_prefix
 from .utils import set_current_tenant, get_tenant_model
 
+from .enums import TenantRoutingMode
+
 
 class TenantMiddleware:
     def __init__(self, get_response):
@@ -56,8 +58,6 @@ class TenantMiddleware:
     def determine_tenant(self, request: HttpRequest) -> TenantMixin | None:
         routing_mode = conf.TENANT_ROUTING_MODE
         TenantModel = get_tenant_model()
-
-        from .enums import TenantRoutingMode
 
         match routing_mode:
             case TenantRoutingMode.SUBFOLDER:
@@ -120,7 +120,7 @@ class TenantMiddleware:
         Handles PATH_INFO and SCRIPT_NAME rewriting.
         Crucially uses set_script_prefix to fix {% url %} generation.
         """
-        if conf.TENANT_ROUTING_MODE != "SUBFOLDER":
+        if conf.TENANT_ROUTING_MODE != TenantRoutingMode.SUBFOLDER:
             return
 
         prefix = conf.TENANT_SUBFOLDER_PREFIX.strip("/")
