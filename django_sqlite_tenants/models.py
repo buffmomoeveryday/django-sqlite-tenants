@@ -1,16 +1,21 @@
-# django_sqlite_tenants/models.py
-from django_sqlite_tenants.utils import get_current_tenant_slug, set_current_tenant
-from django.db import models
+from contextlib import AbstractContextManager
+from contextvars import ContextVar
+from types import TracebackType
+from typing import Any, Self
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.db import DEFAULT_DB_ALIAS, models, transaction
+
+from .utils import tenant_context
+
+_tenant_context_managers: ContextVar[
+    tuple[AbstractContextManager["TenantMixin"], ...]
+] = ContextVar("tenant_context_managers", default=())
 
 
 class DomainMixin(models.Model):
-    """
-    Represents a domain associated with a tenant.
-    A tenant can have multiple domains, including subdomains and custom domains.
-    This is an abstract model that should be inherited by your domain model.
-    """
+    """Abstract domain model associated with a tenant."""
 
     tenant = models.ForeignKey(
         settings.DJANGO_TENANT_SQLITE["TENANT_MODEL"],
@@ -34,19 +39,35 @@ class DomainMixin(models.Model):
         abstract = True
         verbose_name = "Domain"
         verbose_name_plural = "Domains"
-        unique_together = ("tenant", "domain")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("tenant",),
+                condition=models.Q(is_primary=True),
+                name="%(app_label)s_%(class)s_one_primary",
+            )
+        ]
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.domain
 
-    def save(self, *args, **kwargs):
-        # Ensure only one primary domain per tenant
-        if self.is_primary:
-            self.__class__.objects.filter(  # type:ignore
-                tenant=self.tenant,
-                is_primary=True,
-            ).exclude(id=self.pk).update(is_primary=False)
-        super().save(*args, **kwargs)
+    def clean(self) -> None:
+        super().clean()
+        from .provisioning import normalize_domain
+
+        self.domain = normalize_domain(self.domain)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        from .provisioning import normalize_domain
+
+        self.domain = normalize_domain(self.domain)
+        database = kwargs.get("using") or self._state.db or DEFAULT_DB_ALIAS
+        with transaction.atomic(using=database):
+            if self.is_primary:
+                self.__class__.objects.using(database).filter(  # type: ignore[attr-defined]
+                    tenant=self.tenant,
+                    is_primary=True,
+                ).exclude(pk=self.pk).update(is_primary=False)
+            super().save(*args, **kwargs)
 
 
 class TenantMixin(models.Model):
@@ -59,101 +80,84 @@ class TenantMixin(models.Model):
     class Meta:
         abstract = True
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.slug
 
-    def get_primary_domain(self):
-        """Get the primary domain for this tenant."""
-        return self.domains.filter(
-            is_primary=True,
-            is_active=True,
-        ).first()
+    def get_primary_domain(self) -> DomainMixin | None:
+        return self.domains.filter(is_primary=True, is_active=True).first()
 
-    def get_active_domains(self):
-        """Get all active domains for this tenant."""
+    def get_active_domains(self) -> models.QuerySet[DomainMixin]:
         return self.domains.filter(is_active=True)
 
-    def add_domain(self, domain, is_primary=False, is_active=True):
-        """Add a new domain to this tenant."""
-        from django_sqlite_tenants.utils import get_domain_model
+    def add_domain(
+        self, domain: str, is_primary: bool = False, is_active: bool = True
+    ) -> DomainMixin:
+        from .provisioning import normalize_domain
+        from .utils import get_domain_model
 
         DomainModel = get_domain_model()
         return DomainModel.objects.create(
             tenant=self,
-            domain=domain,
+            domain=normalize_domain(domain),
             is_primary=is_primary,
             is_active=is_active,
         )
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Initialize previous tenant stack for context manager
-        if not hasattr(self, "_previous_tenant"):
-            self._previous_tenant = []
-        # Store original slug for tracking changes
-        self._original_slug = self.slug
-
-    def __enter__(self):
-        """
-        Syntax sugar which helps in celery tasks, cron jobs, and other scripts
-
-        Usage:
-            with Tenant.objects.get(slug='test') as tenant:
-                # run some code in tenant test
-            # run some code in previous tenant (public probably)
-        """
-        # Save previous tenant slug
-
-        self._previous_tenant.append(get_current_tenant_slug())
-        self.activate()
-
+    def __enter__(self) -> Self:
+        manager = tenant_context(self)
+        manager.__enter__()
+        stack = _tenant_context_managers.get()
+        _tenant_context_managers.set((*stack, manager))
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self._previous_tenant:
-            set_current_tenant(self._previous_tenant.pop())
-        else:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool | None:
+        stack = _tenant_context_managers.get()
+        if not stack:
             self.deactivate()
+            return None
+        manager = stack[-1]
+        _tenant_context_managers.set(stack[:-1])
+        return manager.__exit__(exc_type, exc_val, exc_tb)
 
-    def activate(self):
-        """
-        Syntax sugar that helps at django shell with fast tenant changing
+    def activate(self) -> None:
+        from .provisioning import register_tenant_database
+        from .utils import set_current_tenant
 
-        Usage:
-            Tenant.objects.get(slug='test').activate()
-        """
-
+        register_tenant_database(self.slug)
         set_current_tenant(self.slug)
 
-    def save(self, *args, **kwargs):
-        """
-        Override save method to handle slug renaming.
-        """
-        # Check if slug has changed
-        slug_changed = False
-        if self.pk:
-            slug_changed = self.slug != self._original_slug
+    def clean(self) -> None:
+        super().clean()
+        from .provisioning import validate_tenant_slug
 
-        # Call parent class save method
+        validate_tenant_slug(self.slug)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        from .provisioning import validate_tenant_slug
+
+        validate_tenant_slug(self.slug)
+        if self.pk:
+            database = kwargs.get("using") or self._state.db or DEFAULT_DB_ALIAS
+            original_slug = (
+                type(self)
+                .objects.using(database)
+                .filter(pk=self.pk)
+                .values_list("slug", flat=True)
+                .first()
+            )
+            if original_slug is not None and self.slug != original_slug:
+                raise ValidationError(
+                    {"slug": "Tenant slugs are immutable after creation."}
+                )
         super().save(*args, **kwargs)
 
-        # If slug changed and it's not a new instance, rename the database file
-        if slug_changed:
-            from django_sqlite_tenants.utils import rename_tenant_database
-
-            rename_tenant_database(self._original_slug, self.slug)
-
-        # Update original slug for next save
-        self._original_slug = self.slug
-
     @classmethod
-    def deactivate(cls):
-        """
-        Syntax sugar, return to public schema
+    def deactivate(cls) -> None:
+        from .utils import set_current_tenant
 
-        Usage:
-            test_tenant.deactivate()
-            # or simpler
-            Tenant.deactivate()
-        """
         set_current_tenant(None)

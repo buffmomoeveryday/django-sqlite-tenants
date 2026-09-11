@@ -1,6 +1,7 @@
-from django.shortcuts import render
 from django.http import HttpResponse
-from django.urls import path, include
+from django.shortcuts import render
+from django.urls import include, path
+
 from django_sqlite_tenants.admin_sites import public_admin_site
 
 

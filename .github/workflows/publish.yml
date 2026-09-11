@@ -1,100 +1,82 @@
-name: Publish Package
+name: Test and publish
 
 on:
   push:
     branches: [main]
-    tags: ['v*']
-    paths-ignore:
-      - 'example/**'
-      - '.gitignore'
-      - '*.md'
-      - 'README.md'
-      - 'docs/**'
-      - '.vscode/**'
-      - '.idea/**'
+    tags: ["v*"]
   pull_request:
     branches: [main]
-    paths-ignore:
-      - 'example/**'
-      - '.gitignore'
-      - '*.md'
-      - 'README.md'
-      - 'docs/**'
-      - '.vscode/**'
-      - '.idea/**'
 
 jobs:
   test:
-    name: Run Tests
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
-    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.11"
+            django: "Django~=5.2"
+          - python: "3.12"
+            django: "Django~=5.2"
+          - python: "3.12"
+            django: "Django~=6.0"
+          - python: "3.13"
+            django: "Django~=5.2"
+          - python: "3.13"
+            django: "Django~=6.0"
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.13'
-    
-    - name: Install UV
-      run: pip install uv
-    
-    - name: Sync dependencies
-      run: uv sync
-    
-    # - name: Run tests
-      # run: uv run python -m  django_sqlite_tenants/tests.py -v
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install dependencies
+        run: |
+          python -m pip install uv
+          uv sync
+          uv pip install "${{ matrix.django }}"
+      - name: Run checks and tests
+        run: |
+          uv run --no-sync ruff check .
+          uv run --no-sync ruff format --check .
+          uv run --no-sync ty check
+          uv run --no-sync python -m django check --settings=tests.settings
+          uv run --no-sync pytest
+          DJANGO_DEBUG=false DJANGO_SECRET_KEY="ci-only-secret-key-with-at-least-fifty-random-looking-characters" uv run --no-sync python example/manage.py check --deploy
+      - name: Build distributions
+        run: uv build
 
   publish:
-    name: Publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
     runs-on: ubuntu-latest
     environment: django-sqlite-tenants
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    needs: test
     permissions:
       contents: read
       id-token: write
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.13'
-    
-    - name: Install UV
-      run: pip install uv
-    
-    - name: Build package
-      run: uv build
-    
-    - name: Publish to PyPI
-      run: uv publish
-      env:
-        UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install uv
+        run: python -m pip install uv
+      - name: Verify tag matches package version
+        run: |
+          python -c 'import os,tomllib; expected="v"+tomllib.load(open("pyproject.toml","rb"))["project"]["version"]; actual=os.environ["GITHUB_REF_NAME"]; assert actual == expected, f"tag {actual} != {expected}"'
+      - name: Build and publish
+        run: |
+          uv build
+          uv publish --trusted-publishing always
 
-  create_release:
-    name: Create GitHub Release
-    runs-on: ubuntu-latest
+  release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: publish
+    runs-on: ubuntu-latest
     permissions:
       contents: write
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Create Release
-      uses: actions/create-release@v1
-      with:
-        tag_name: ${{ github.ref }}
-        release_name: Release ${{ github.ref }}
-        draft: false
-        prerelease: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v4
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" --generate-notes

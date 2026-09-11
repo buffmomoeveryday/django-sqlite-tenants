@@ -1,5 +1,7 @@
 from django.contrib import admin
+
 from django_sqlite_tenants.admin_sites import tenant_admin_site
+
 from .models import TenantUser
 
 

@@ -1,6 +1,8 @@
+import os
 import sys
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
 
 # Add the root directory to sys.path to ensure django_sqlite_tenants is importable
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
@@ -8,12 +10,23 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = "django-insecure--i^bd!b180t)$u&!oe%_)4(bud^1q+bwaqlpe467ly#koukm_q"
-
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
-ALLOWED_HOSTS = ["*"]
+DEBUG = os.environ.get("DJANGO_DEBUG", "true").lower() in {"1", "true", "yes"}
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "")
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = "django-insecure-example-only-change-me-before-deployment"
+    else:
+        raise ImproperlyConfigured("DJANGO_SECRET_KEY is required in production.")
+
+allowed_hosts_setting = os.environ.get("DJANGO_ALLOWED_HOSTS")
+if not allowed_hosts_setting and not DEBUG:
+    raise ImproperlyConfigured("DJANGO_ALLOWED_HOSTS is required in production.")
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in (allowed_hosts_setting or "localhost,127.0.0.1,.localhost").split(",")
+    if host.strip()
+]
 
 
 SHARED_APPS = [
@@ -24,7 +37,6 @@ SHARED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "django_sqlite_tenants",
-    #
     "apps.tenant",
 ]
 
@@ -42,6 +54,8 @@ DJANGO_TENANT_SQLITE = {
     "TENANT_ROUTING_MODE": "DOMAIN",
     "TENANT_SUBFOLDER_PREFIX": "r",
     "TENANT_BASE_DOMAIN": "localhost:8000",
+    "TENANTS_DB_FOLDER": "tenants",
+    "AUTO_RUN_MIGRATION": False,
 }
 
 
@@ -82,6 +96,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = "core.wsgi.application"
+LOGIN_REDIRECT_URL = "/"
 
 
 # Database
@@ -135,3 +150,11 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = "static/"
+
+if not DEBUG:
+    SECURE_SSL_REDIRECT = True
+    SECURE_HSTS_SECONDS = 31_536_000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True

@@ -1,8 +1,8 @@
-from django.contrib.auth.models import User, Group
-from django.contrib.auth.admin import UserAdmin, GroupAdmin
-
-from django_sqlite_tenants.admin_sites import public_admin_site, PublicAdminSite
 from apps.tenant.models import CustomTenant, Domain
+from django.contrib.auth.admin import GroupAdmin, UserAdmin
+from django.contrib.auth.models import Group, User
+
+from django_sqlite_tenants.admin_sites import public_admin_site
 
 # Register your models here.
 public_admin_site.register(CustomTenant)

@@ -1,10 +1,10 @@
+from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import HttpRequest
-from django.shortcuts import render, redirect
-from .models import Blog
+from django.shortcuts import get_object_or_404, redirect, render
 from django.views import View
 
-from django.utils.decorators import method_decorator
-from django.contrib.auth.decorators import login_required
+from .forms import BlogForm
+from .models import Blog
 
 
 class BlogListView(View):
@@ -16,35 +16,42 @@ class BlogListView(View):
         )
 
 
-class BlogCreateView(View):
-    # @method_decorator(login_required)
+class BlogCreateView(LoginRequiredMixin, View):
     def get(self, request: HttpRequest):
-        return render(request, "blog/create_blog.html", context={})
+        return render(request, "blog/create_blog.html", {"form": BlogForm()})
 
-    # @method_decorator(login_required)
     def post(self, request: HttpRequest):
-        name = request.POST.get("name")
-        post = request.POST.get("post")
-        Blog.objects.create(name=name, post=post)
-        return redirect("blog_create")
+        form = BlogForm(request.POST)
+        if form.is_valid():
+            form.save()
+            return redirect("blog_list_view")
+        return render(request, "blog/create_blog.html", {"form": form}, status=400)
 
 
 class BlogDetail(View):
     def get(self, request: HttpRequest, pk: int):
-        blog = Blog.objects.get(pk=pk)
-        return render(request, "blog/detail_blog.html", context={"blog": blog})
+        blog = get_object_or_404(Blog, pk=pk)
+        return render(request, "blog/detail_blog.html", {"blog": blog})
 
 
-class BlogEditView(View):
-    @method_decorator(login_required)
+class BlogEditView(LoginRequiredMixin, View):
     def get(self, request: HttpRequest, pk: int):
-        blog = Blog.objects.get(pk=pk)
-        return render(request, "blog/edit_blog.html", context={"blog": blog})
+        blog = get_object_or_404(Blog, pk=pk)
+        return render(
+            request,
+            "blog/edit_blog.html",
+            {"blog": blog, "form": BlogForm(instance=blog)},
+        )
 
-    @method_decorator(login_required)
     def post(self, request: HttpRequest, pk: int):
-        blog = Blog.objects.get(pk=pk)
-        blog.name = request.POST.get("name")
-        blog.post = request.POST.get("post")
-        blog.save()
-        return redirect("blog_detail", pk=blog.pk)
+        blog = get_object_or_404(Blog, pk=pk)
+        form = BlogForm(request.POST, instance=blog)
+        if form.is_valid():
+            blog = form.save()
+            return redirect("blog_detail", pk=blog.pk)
+        return render(
+            request,
+            "blog/edit_blog.html",
+            {"blog": blog, "form": form},
+            status=400,
+        )

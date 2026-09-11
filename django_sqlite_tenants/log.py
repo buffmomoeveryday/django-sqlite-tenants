@@ -1,5 +1,7 @@
-from django_sqlite_tenants.utils import get_current_tenant
 import logging
+from typing import Any, cast
+
+from django_sqlite_tenants.utils import get_current_tenant
 
 
 class TenantContextFilter(logging.Filter):
@@ -7,13 +9,11 @@ class TenantContextFilter(logging.Filter):
     Add the current ``tenant_slug`` and ``domain`` to log records.
     """
 
-    def filter(self, record):
+    def filter(self, record: logging.LogRecord) -> bool:
         tenant = get_current_tenant()
-        record.tenant_slug = tenant.slug if tenant else None
-        record.schema_name = record.tenant_slug
-        record.domain = (
-            tenant.get_primary_domain().domain
-            if tenant and tenant.get_primary_domain()
-            else None
-        )
+        typed_record = cast(Any, record)
+        typed_record.tenant_slug = tenant.slug if tenant else None
+        typed_record.schema_name = typed_record.tenant_slug
+        primary_domain = tenant.get_primary_domain() if tenant else None
+        typed_record.domain = primary_domain.domain if primary_domain else None
         return True
