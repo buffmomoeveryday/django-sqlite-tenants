@@ -1,10 +1,7 @@
-# from django.db import models
 from django_sqlite_tenants.models import DomainMixin, TenantMixin
 
-# Create your models here.
 
-
-class CustomTenant(TenantMixin):
+class Tenant(TenantMixin):
     pass
 
 

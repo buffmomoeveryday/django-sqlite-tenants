@@ -1,10 +1,13 @@
-from django_sqlite_tenants.enums import TenantRoutingMode
+from typing import Any
+
 from django.conf import settings
+
+from django_sqlite_tenants.enums import TenantRoutingMode
 
 
 class AppSettings:
-    def __init__(self):
-        self._defaults = {
+    def __init__(self) -> None:
+        self._defaults: dict[str, Any] = {
             "TENANT_MODEL": None,
             "DOMAIN_MODEL": None,
             "TENANT_URLCONF": None,
@@ -14,14 +17,14 @@ class AppSettings:
             "TENANTS_DB_FOLDER": "tenants",
             "SHARED_APPS": [],
             "TENANT_APPS": [],
-            "AUTO_RUN_MIGRATION": True,
+            "AUTO_RUN_MIGRATION": False,
         }
 
     @property
-    def user_settings(self):
+    def user_settings(self) -> dict[str, Any]:
         return getattr(settings, "DJANGO_TENANT_SQLITE", {})
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         # Special handling for TENANT_APPS and SHARED_APPS to allow them to be top-level
         if name in ["TENANT_APPS", "SHARED_APPS"]:
             if name in self.user_settings:

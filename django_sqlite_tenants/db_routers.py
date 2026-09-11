@@ -1,51 +1,91 @@
-# django_sqlite_tenants/db_routes.py
-from .utils import get_current_tenant_slug
-from .conf import conf
+from collections.abc import Iterable
+from typing import Any
 
-DJANGO_CACHE_APP_LABEL = "django_cache"
+from django.apps import apps
+from django.core.exceptions import ImproperlyConfigured
+from django.db import models
+
+from .conf import conf
+from .provisioning import is_tenant_database_alias
+from .utils import get_current_tenant_slug
+
+
+class TenantContextError(ImproperlyConfigured):
+    """Raised when tenant data is accessed without an active tenant."""
+
+
+def _app_labels(entries: Iterable[str]) -> set[str]:
+    labels: set[str] = set()
+    configs = list(apps.get_app_configs())
+    for entry in entries:
+        match = next(
+            (
+                config
+                for config in configs
+                if entry
+                in {
+                    config.label,
+                    config.name,
+                    f"{config.__class__.__module__}.{config.__class__.__name__}",
+                }
+            ),
+            None,
+        )
+        labels.add(match.label if match else entry.rsplit(".", 1)[-1])
+    return labels
 
 
 class TenantRouter:
-    def db_for_read(self, model, **hints):
-        if model._meta.app_label in self._get_shared_app_labels():
+    def _route(self, model: type[models.Model]) -> str | None:
+        label = model._meta.app_label
+        if label in _app_labels(conf.SHARED_APPS):
             return "default"
-
-        tenant_slug = get_current_tenant_slug()
-        if tenant_slug:
+        if label in _app_labels(conf.TENANT_APPS):
+            tenant_slug = get_current_tenant_slug()
+            if not tenant_slug:
+                raise TenantContextError(
+                    f"Tenant app '{label}' was accessed without an active tenant."
+                )
             return tenant_slug
-        return "default"
-
-    def db_for_write(self, model, **hints):
-        if model._meta.app_label in self._get_shared_app_labels():
-            return "default"
-
-        tenant_slug = get_current_tenant_slug()
-        if tenant_slug:
-            return tenant_slug
-        return "default"
-
-    def allow_relation(self, obj1, obj2, **hints):
-        # Allow if both are in the same DB or if one is in default (shared)
-        db_list = (self.db_for_read(obj1), self.db_for_read(obj2))
-        if db_list[0] == db_list[1]:
-            return True
-
-        # Allow relations between tenant and shared apps
-        if "default" in db_list:
-            return True
-
         return None
 
-    def allow_migrate(self, db, app_label, model_name=None, **hints):
-        shared_labels = self._get_shared_app_labels()
-        tenant_labels = [app.split(".")[-1] for app in conf.TENANT_APPS]
+    def db_for_read(self, model: type[models.Model], **hints: Any) -> str | None:
+        return self._route(model)
 
+    def db_for_write(self, model: type[models.Model], **hints: Any) -> str | None:
+        return self._route(model)
+
+    def allow_relation(
+        self, obj1: models.Model, obj2: models.Model, **hints: Any
+    ) -> bool | None:
+        database1 = obj1._state.db
+        database2 = obj2._state.db
+        if database1 and database2:
+            return database1 == database2
+
+        label1 = obj1._meta.app_label
+        label2 = obj2._meta.app_label
+        shared = _app_labels(conf.SHARED_APPS)
+        tenant = _app_labels(conf.TENANT_APPS)
+        if (label1 in shared and label2 in tenant) or (
+            label1 in tenant and label2 in shared
+        ):
+            return False
+        return None
+
+    def allow_migrate(
+        self,
+        db: str,
+        app_label: str,
+        model_name: str | None = None,
+        **hints: Any,
+    ) -> bool | None:
+        shared = _app_labels(conf.SHARED_APPS)
+        tenant = _app_labels(conf.TENANT_APPS)
         if db == "default":
-            # Allow shared apps and those not strictly defined as tenant apps
-            # (unless generic third party apps are considered shared by default)
-            return app_label in shared_labels
-        else:
-            return app_label in tenant_labels
-
-    def _get_shared_app_labels(self):
-        return [app.split(".")[-1] for app in conf.SHARED_APPS]
+            return app_label in shared
+        if is_tenant_database_alias(db):
+            return app_label in tenant
+        if app_label in shared or app_label in tenant:
+            return False
+        return None

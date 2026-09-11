@@ -1,22 +1,55 @@
-# django_sqlite_tenants/utils.py
-import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
+from typing import TYPE_CHECKING, TypeVar, cast
 
 from django.apps import apps
-from .conf import conf
 from django.core.exceptions import ImproperlyConfigured
+from django.db.models import Model
 
-_thread_locals = threading.local()
+from .conf import conf
+
+if TYPE_CHECKING:
+    from .models import DomainMixin, TenantMixin
+
+_current_tenant_slug: ContextVar[str | None] = ContextVar(
+    "django_sqlite_tenants_slug", default=None
+)
+_TenantContextValue = TypeVar("_TenantContextValue", bound=str | Model)
 
 
-def set_current_tenant(tenant_slug):
-    setattr(_thread_locals, "tenant_slug", tenant_slug)
+def set_current_tenant(tenant_slug: str | None) -> Token[str | None]:
+    """Set the current tenant and return a token that can restore prior state."""
+    return _current_tenant_slug.set(tenant_slug)
 
 
-def get_current_tenant_slug():
-    return getattr(_thread_locals, "tenant_slug", None)
+def reset_current_tenant(token: Token[str | None]) -> None:
+    """Restore tenant state previously returned by :func:`set_current_tenant`."""
+    _current_tenant_slug.reset(token)
 
 
-def get_current_tenant():
+def get_current_tenant_slug() -> str | None:
+    return _current_tenant_slug.get()
+
+
+@contextmanager
+def tenant_context(
+    tenant_or_slug: _TenantContextValue, *, register_database: bool = True
+) -> Iterator[_TenantContextValue]:
+    """Activate a tenant and its database for a synchronous context."""
+    slug = cast(str, getattr(tenant_or_slug, "slug", tenant_or_slug))
+    if register_database:
+        from .provisioning import register_tenant_database
+
+        register_tenant_database(slug)
+    token = set_current_tenant(slug)
+    try:
+        yield tenant_or_slug
+    finally:
+        reset_current_tenant(token)
+
+
+def get_current_tenant() -> "TenantMixin | None":
     slug = get_current_tenant_slug()
     if not slug:
         return None
@@ -24,7 +57,7 @@ def get_current_tenant():
     return TenantModel.objects.filter(slug=slug).first()
 
 
-def get_tenant_model():
+def get_tenant_model() -> type["TenantMixin"]:
     """
     Returns the Tenant model class from the settings.
     Example setting: TENANT_MODEL = 'core.Tenant'
@@ -34,7 +67,9 @@ def get_tenant_model():
         raise ImproperlyConfigured("TENANT_MODEL setting is missing.")
 
     try:
-        return apps.get_model(model_path, require_ready=False)
+        return cast(
+            type["TenantMixin"], apps.get_model(model_path, require_ready=False)
+        )
     except ValueError:
         raise ImproperlyConfigured(
             "TENANT_MODEL must be of the form 'app_label.model_name'"
@@ -45,7 +80,7 @@ def get_tenant_model():
         )
 
 
-def get_domain_model():
+def get_domain_model() -> type["DomainMixin"]:
     """
     Returns the Domain model class from the settings.
     Example setting: DOMAIN_MODEL = 'core.Domain'
@@ -55,7 +90,9 @@ def get_domain_model():
         raise ImproperlyConfigured("DOMAIN_MODEL setting is missing.")
 
     try:
-        return apps.get_model(model_path, require_ready=False)
+        return cast(
+            type["DomainMixin"], apps.get_model(model_path, require_ready=False)
+        )
     except ValueError:
         raise ImproperlyConfigured(
             "DOMAIN_MODEL must be of the form 'app_label.model_name'"
@@ -64,23 +101,3 @@ def get_domain_model():
         raise ImproperlyConfigured(
             f"DOMAIN_MODEL '{model_path}' has not been installed"
         )
-
-
-def rename_tenant_database(old_slug, new_slug):
-    """
-    Rename a tenant's SQLite database file when the slug changes.
-    """
-    import os
-    from django.conf import settings
-    from django_sqlite_tenants.conf import conf
-
-    # Ensure the tenants directory exists
-    tenant_dir = os.path.join(settings.BASE_DIR, conf.TENANTS_DB_FOLDER)
-
-    old_db_path = os.path.join(tenant_dir, f"{old_slug}.sqlite3")
-    new_db_path = os.path.join(tenant_dir, f"{new_slug}.sqlite3")
-
-    if os.path.exists(old_db_path):
-        if os.path.exists(new_db_path):
-            raise FileExistsError(f"Database file for slug '{new_slug}' already exists")
-        os.rename(old_db_path, new_db_path)

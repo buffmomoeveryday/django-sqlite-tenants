@@ -1,7 +1,7 @@
 from django_sqlite_tenants.utils import get_current_tenant_slug
 
 
-def make_key(key, key_prefix, version):
+def make_key(key: str, key_prefix: str, version: int) -> str:
     """
     Tenant aware function to generate a cache key.
 
@@ -9,10 +9,10 @@ def make_key(key, key_prefix, version):
     `slug` and `key_prefix'.
     """
     tenant_slug = get_current_tenant_slug()
-    return "%s:%s:%s:%s" % (tenant_slug or "public", key_prefix, version, key)
+    return f"{tenant_slug or 'public'}:{key_prefix}:{version}:{key}"
 
 
-def reverse_key(key):
+def reverse_key(key: str) -> str:
     """
     Tenant aware function to reverse a cache key.
 
