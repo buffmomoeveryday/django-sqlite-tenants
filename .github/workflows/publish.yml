@@ -41,7 +41,7 @@ jobs:
           uv run --no-sync ty check
           uv run --no-sync python -m django check --settings=tests.settings
           uv run --no-sync pytest
-          DJANGO_DEBUG=false DJANGO_SECRET_KEY="ci-only-secret-key-with-at-least-fifty-random-looking-characters" uv run --no-sync python example/manage.py check --deploy
+          DJANGO_DEBUG=false DJANGO_SECRET_KEY="ci-only-secret-key-with-at-least-fifty-random-looking-characters" DJANGO_ALLOWED_HOSTS="example.test,.example.test" uv run --no-sync python example/manage.py check --deploy
       - name: Build distributions
         run: uv build
 
