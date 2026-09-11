@@ -13,6 +13,7 @@ from django_sqlite_tenants.provisioning import (
     register_tenant_database,
     remove_tenant_database_files,
     reserve_tenant_database,
+    tenant_lifecycle_lock,
     unregister_tenant_database,
 )
 from django_sqlite_tenants.utils import get_tenant_model, tenant_context
@@ -65,6 +66,10 @@ class Command(BaseCommand):
             raise CommandError(f"{len(failures)} tenant migration(s) failed: {summary}")
 
     def migrate_tenant_safely(self, tenant: TenantMixin) -> None:
+        with tenant_lifecycle_lock(tenant.slug):
+            self._migrate_tenant_locked(tenant)
+
+    def _migrate_tenant_locked(self, tenant: TenantMixin) -> None:
         slug = tenant.slug
         database_path = get_tenant_database_path(slug)
         backup_path = Path(f"{database_path}.bak")
@@ -92,9 +97,18 @@ class Command(BaseCommand):
                 call_command("migrate", database=slug, interactive=False)
 
             connections[slug].close()
-            backup_path.unlink(missing_ok=True)
             tenant.maintenance_mode = False
             tenant.save(using=DEFAULT_DB_ALIAS, update_fields=["maintenance_mode"])
+            if backup_created:
+                try:
+                    backup_path.unlink()
+                except OSError as exc:
+                    self.stderr.write(
+                        self.style.WARNING(
+                            f"Migration succeeded, but backup cleanup failed; "
+                            f"{backup_path} was retained: {exc}"
+                        )
+                    )
             self.stdout.write(self.style.SUCCESS(f"Successfully migrated {slug}"))
         except Exception:
             if registered:

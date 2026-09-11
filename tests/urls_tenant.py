@@ -12,6 +12,7 @@ def current_tenant(request):
 def stream_tenant(request):
     def content():
         yield get_current_tenant_slug() or "missing"
+        yield get_current_tenant_slug() or "missing"
 
     return StreamingHttpResponse(content())
 

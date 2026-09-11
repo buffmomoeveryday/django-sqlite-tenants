@@ -7,6 +7,7 @@ from django.db import DEFAULT_DB_ALIAS
 from django_sqlite_tenants.provisioning import (
     get_tenant_database_path,
     remove_tenant_database_files,
+    tenant_lifecycle_lock,
     unregister_tenant_database,
     validate_tenant_slug,
 )
@@ -29,23 +30,24 @@ class Command(BaseCommand):
         if not options["yes"]:
             raise CommandError("Pass --yes to confirm permanent deletion.")
 
-        TenantModel = get_tenant_model()
-        if TenantModel.objects.using(DEFAULT_DB_ALIAS).filter(slug=slug).exists():
-            raise CommandError(
-                f"Tenant '{slug}' still exists; delete its shared record first."
-            )
+        with tenant_lifecycle_lock(slug):
+            TenantModel = get_tenant_model()
+            if TenantModel.objects.using(DEFAULT_DB_ALIAS).filter(slug=slug).exists():
+                raise CommandError(
+                    f"Tenant '{slug}' still exists; delete its shared record first."
+                )
 
-        path = get_tenant_database_path(slug)
-        candidates = [
-            path,
-            Path(f"{path}-wal"),
-            Path(f"{path}-shm"),
-            Path(f"{path}.bak"),
-        ]
-        existing = [candidate for candidate in candidates if candidate.exists()]
-        if not existing:
-            raise CommandError(f"No database files found for tenant '{slug}'.")
+            path = get_tenant_database_path(slug)
+            candidates = [
+                path,
+                Path(f"{path}-wal"),
+                Path(f"{path}-shm"),
+                Path(f"{path}.bak"),
+            ]
+            existing = [candidate for candidate in candidates if candidate.exists()]
+            if not existing:
+                raise CommandError(f"No database files found for tenant '{slug}'.")
 
-        unregister_tenant_database(slug)
-        remove_tenant_database_files(path, include_backup=True)
+            unregister_tenant_database(slug)
+            remove_tenant_database_files(path, include_backup=True)
         self.stdout.write(self.style.SUCCESS(f"Purged database files for '{slug}'."))

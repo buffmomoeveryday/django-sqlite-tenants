@@ -1,8 +1,13 @@
 import asyncio
 import sqlite3
+import subprocess
+import sys
+import time
+from io import StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from asgiref.sync import markcoroutinefunction
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ImproperlyConfigured, ValidationError
@@ -29,6 +34,7 @@ from django_sqlite_tenants.provisioning import (
     normalize_domain,
     register_tenant_database,
     remove_tenant_database_files,
+    tenant_lifecycle_lock,
     unregister_tenant_database,
     validate_tenant_slug,
 )
@@ -94,6 +100,43 @@ class ValidationTests(SimpleTestCase):
         self.assertEqual(asyncio.run(run_workers()), ["one", "two"])
         self.assertIsNone(get_current_tenant_slug())
 
+    def test_lifecycle_lock_serializes_another_process(self):
+        script = """
+import sys
+from django.conf import settings
+settings.configure(
+    BASE_DIR=sys.argv[1],
+    SECRET_KEY="lock-test",
+    INSTALLED_APPS=["django_sqlite_tenants"],
+    DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
+    DJANGO_TENANT_SQLITE={
+        "TENANT_MODEL": "placeholder.Tenant",
+        "TENANTS_DB_FOLDER": "tenants",
+    },
+)
+import django
+django.setup()
+from django_sqlite_tenants.provisioning import tenant_lifecycle_lock
+print("ready", flush=True)
+with tenant_lifecycle_lock("lock-test"):
+    print("acquired", flush=True)
+"""
+        with tenant_lifecycle_lock("lock-test"):
+            process = subprocess.Popen(
+                [sys.executable, "-c", script, str(settings.BASE_DIR)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            assert process.stdout is not None
+            self.assertEqual(process.stdout.readline().strip(), "ready")
+            time.sleep(0.1)
+            self.assertIsNone(process.poll())
+
+        stdout, stderr = process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 0, stderr)
+        self.assertEqual(stdout.strip(), "acquired")
+
     @override_settings(
         DJANGO_TENANT_SQLITE={
             "TENANT_MODEL": "tenant_registry.Tenant",
@@ -123,6 +166,9 @@ class ModelAndRouterTests(TransactionTestCase):
     def test_tenant_slug_is_immutable(self):
         tenant = Tenant.objects.create(name="Acme", slug="acme")
         tenant.slug = "other"
+        with self.assertRaises(ValidationError) as clean_error:
+            tenant.full_clean()
+        self.assertIn("slug", clean_error.exception.message_dict)
         with self.assertRaisesMessage(ValidationError, "immutable"):
             tenant.save()
 
@@ -154,6 +200,11 @@ class ModelAndRouterTests(TransactionTestCase):
             router.db_for_read(tenant)
         with tenant_context("acme", register_database=False):
             self.assertEqual(router.db_for_write(tenant), "acme")
+
+    @override_settings(TENANT_APPS=["missing.application.Config"])
+    def test_router_rejects_unresolved_configured_apps(self):
+        with self.assertRaisesMessage(ImproperlyConfigured, "INSTALLED_APPS"):
+            TenantRouter().db_for_read(Item)
 
     def test_cross_database_relations_are_denied(self):
         router = TenantRouter()
@@ -362,6 +413,62 @@ class MigrationSafetyTests(TransactionTestCase):
         self.assertFalse(tenant.maintenance_mode)
         self.assertFalse(Path(f"{path}.bak").exists())
 
+    def test_maintenance_save_failure_preserves_backup(self):
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        path = get_tenant_database_path("acme")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(path) as database:
+            database.execute("CREATE TABLE original (id INTEGER)")
+
+        original_save = tenant.save
+
+        def save_or_fail(*args, **kwargs):
+            if not tenant.maintenance_mode:
+                raise RuntimeError("shared save failed")
+            return original_save(*args, **kwargs)
+
+        with (
+            patch(
+                "django_sqlite_tenants.management.commands.migrate_tenant.call_command"
+            ),
+            patch.object(tenant, "save", side_effect=save_or_fail),
+            self.assertRaisesMessage(RuntimeError, "shared save failed"),
+        ):
+            MigrateTenantCommand().migrate_tenant_safely(tenant)
+
+        tenant.refresh_from_db()
+        self.assertTrue(tenant.maintenance_mode)
+        self.assertTrue(Path(f"{path}.bak").exists())
+
+    def test_backup_cleanup_failure_is_only_a_warning(self):
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        path = get_tenant_database_path("acme")
+        backup_path = Path(f"{path}.bak")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(path) as database:
+            database.execute("CREATE TABLE original (id INTEGER)")
+
+        original_unlink = Path.unlink
+
+        def fail_backup_cleanup(candidate, *args, **kwargs):
+            if candidate == backup_path:
+                raise PermissionError("read-only backup")
+            return original_unlink(candidate, *args, **kwargs)
+
+        stderr = StringIO()
+        with (
+            patch(
+                "django_sqlite_tenants.management.commands.migrate_tenant.call_command"
+            ),
+            patch.object(Path, "unlink", fail_backup_cleanup),
+        ):
+            MigrateTenantCommand(stderr=stderr).migrate_tenant_safely(tenant)
+
+        tenant.refresh_from_db()
+        self.assertFalse(tenant.maintenance_mode)
+        self.assertTrue(backup_path.exists())
+        self.assertIn("backup cleanup failed", stderr.getvalue())
+
     def test_batch_migration_continues_and_reports_failure(self):
         Tenant.objects.create(name="Acme", slug="acme")
         Tenant.objects.create(name="Other", slug="other")
@@ -400,8 +507,36 @@ class MiddlewareTests(TransactionTestCase):
         self.assertIsNone(get_current_tenant_slug())
 
         response = Client().get("/r/acme/stream/")
-        self.assertEqual(b"".join(response.streaming_content), b"acme")
+        content = iter(response.streaming_content)
+        self.assertEqual(next(content), b"acme")
         self.assertIsNone(get_current_tenant_slug())
+        self.assertEqual(next(content), b"acme")
+        self.assertIsNone(get_current_tenant_slug())
+
+    @override_settings(
+        DJANGO_TENANT_SQLITE={
+            "TENANT_MODEL": "tenant_registry.Tenant",
+            "DOMAIN_MODEL": "tenant_registry.Domain",
+            "TENANT_URLCONF": "tests.urls_tenant",
+            "TENANT_ROUTING_MODE": "SUBFOLDER",
+            "TENANT_SUBFOLDER_PREFIX": "",
+            "TENANT_BASE_DOMAIN": "example.test",
+            "TENANTS_DB_FOLDER": "tenants",
+        }
+    )
+    def test_empty_subfolder_prefix_does_not_capture_public_paths(self):
+        request = self.factory.get("/acme/")
+        middleware = TenantMiddleware(lambda request: HttpResponse("public"))
+        self.assertIsNone(middleware.determine_tenant(request))
+
+    def test_marked_async_response_uses_async_path(self):
+        class MarkedResponse:
+            async def __call__(self, request):
+                return HttpResponse()
+
+        response = MarkedResponse()
+        markcoroutinefunction(response)
+        self.assertTrue(TenantMiddleware(response).is_async)
 
     def test_existing_request_tenant_continues_and_exception_restores_state(self):
         request = self.factory.get("/")
@@ -439,6 +574,8 @@ class MiddlewareTests(TransactionTestCase):
         async def content():
             await asyncio.sleep(0)
             yield get_current_tenant_slug() or "missing"
+            await asyncio.sleep(0)
+            yield get_current_tenant_slug() or "missing"
 
         async def response(request):
             from django.http import StreamingHttpResponse
@@ -446,8 +583,10 @@ class MiddlewareTests(TransactionTestCase):
             return StreamingHttpResponse(content())
 
         wrapped = await TenantMiddleware(response)(request)
-        chunks = [chunk async for chunk in wrapped.streaming_content]
-        self.assertEqual(b"".join(chunks), b"acme")
+        content_iterator = wrapped.streaming_content.__aiter__()
+        self.assertEqual(await anext(content_iterator), b"acme")
+        self.assertIsNone(get_current_tenant_slug())
+        self.assertEqual(await anext(content_iterator), b"acme")
         self.assertIsNone(get_current_tenant_slug())
 
     def test_admin_sites_render_stock_templates(self):

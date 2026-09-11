@@ -3,6 +3,7 @@
 This development-only project demonstrates domain-routed tenant databases.
 
 ```bash
+export DJANGO_DEBUG=true
 uv sync
 uv run python manage.py migrate
 uv run python manage.py create_tenant acme --name "Acme" --domain acme.localhost

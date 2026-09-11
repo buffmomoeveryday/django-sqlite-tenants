@@ -136,6 +136,19 @@ class TenantMixin(models.Model):
         from .provisioning import validate_tenant_slug
 
         validate_tenant_slug(self.slug)
+        if self.pk:
+            database = self._state.db or DEFAULT_DB_ALIAS
+            original_slug = (
+                type(self)
+                .objects.using(database)
+                .filter(pk=self.pk)
+                .values_list("slug", flat=True)
+                .first()
+            )
+            if original_slug is not None and self.slug != original_slug:
+                raise ValidationError(
+                    {"slug": "Tenant slugs are immutable after creation."}
+                )
 
     def save(self, *args: Any, **kwargs: Any) -> None:
         from .provisioning import validate_tenant_slug

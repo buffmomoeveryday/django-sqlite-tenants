@@ -31,7 +31,11 @@ def _app_labels(entries: Iterable[str]) -> set[str]:
             ),
             None,
         )
-        labels.add(match.label if match else entry.rsplit(".", 1)[-1])
+        if match is None:
+            raise ImproperlyConfigured(
+                f"Configured app '{entry}' is not present in INSTALLED_APPS."
+            )
+        labels.add(match.label)
     return labels
 
 

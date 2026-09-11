@@ -77,14 +77,7 @@ class Migration(migrations.Migration):
                 "verbose_name": "Domain",
                 "verbose_name_plural": "Domains",
                 "abstract": False,
+                "unique_together": {("tenant", "domain")},
             },
-        ),
-        migrations.AddConstraint(
-            model_name="domain",
-            constraint=models.UniqueConstraint(
-                condition=models.Q(("is_primary", True)),
-                fields=("tenant",),
-                name="tenant_domain_one_primary",
-            ),
         ),
     ]

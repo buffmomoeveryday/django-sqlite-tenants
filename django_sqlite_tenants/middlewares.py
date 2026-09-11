@@ -1,9 +1,8 @@
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import contextmanager
-from inspect import iscoroutinefunction
 from typing import Any, cast
 
-from asgiref.sync import markcoroutinefunction
+from asgiref.sync import iscoroutinefunction, markcoroutinefunction
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.http import Http404, HttpRequest, HttpResponse, StreamingHttpResponse
@@ -38,7 +37,8 @@ class TenantMiddleware:
         ],
     ) -> None:
         self.get_response = get_response
-        self.is_async = iscoroutinefunction(get_response)
+        # asgiref also recognizes callables marked for Django's async adapter.
+        self.is_async = iscoroutinefunction(get_response)  # ty: ignore[deprecated]
         if self.is_async:
             markcoroutinefunction(cast(Any, self))
 
@@ -135,16 +135,39 @@ class TenantMiddleware:
         if getattr(response, "is_async", False):
 
             async def async_content() -> AsyncIterator[bytes]:
-                with self._request_context(tenant, urlconf, script_prefix):
-                    async for chunk in cast(AsyncIterator[bytes], content):
+                iterator = cast(AsyncIterator[bytes], content).__aiter__()
+                try:
+                    while True:
+                        try:
+                            with self._request_context(tenant, urlconf, script_prefix):
+                                chunk = await anext(iterator)
+                        except StopAsyncIteration:
+                            break
                         yield chunk
+                finally:
+                    close = getattr(iterator, "aclose", None)
+                    if close is not None:
+                        with self._request_context(tenant, urlconf, script_prefix):
+                            await close()
 
             streaming_response.streaming_content = async_content()
         else:
 
             def sync_content() -> Iterator[bytes]:
-                with self._request_context(tenant, urlconf, script_prefix):
-                    yield from cast(Iterator[bytes], content)
+                iterator = iter(cast(Iterator[bytes], content))
+                try:
+                    while True:
+                        try:
+                            with self._request_context(tenant, urlconf, script_prefix):
+                                chunk = next(iterator)
+                        except StopIteration:
+                            break
+                        yield chunk
+                finally:
+                    close = getattr(iterator, "close", None)
+                    if close is not None:
+                        with self._request_context(tenant, urlconf, script_prefix):
+                            close()
 
             streaming_response.streaming_content = sync_content()
         return streaming_response
@@ -258,8 +281,6 @@ class TenantMiddleware:
         prefix = conf.TENANT_SUBFOLDER_PREFIX.strip("/")
         if prefix and len(parts) >= 2 and parts[0] == prefix:
             return parts[1]
-        if not prefix and parts and parts[0]:
-            return parts[0]
         return None
 
     def _resolve_by_subfolder(

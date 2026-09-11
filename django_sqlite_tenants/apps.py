@@ -67,12 +67,32 @@ def check_tenant_settings(
             )
         )
 
-    overlap = _app_labels(conf.SHARED_APPS) & _app_labels(conf.TENANT_APPS)
-    if overlap:
+    try:
+        overlap = _app_labels(conf.SHARED_APPS) & _app_labels(conf.TENANT_APPS)
+    except ImproperlyConfigured as exc:
         messages.append(
             checks.Error(
-                f"Apps cannot be both shared and tenant-specific: {sorted(overlap)}.",
+                str(exc),
                 id="django_sqlite_tenants.E004",
+            )
+        )
+    else:
+        if overlap:
+            messages.append(
+                checks.Error(
+                    f"Apps cannot be both shared and tenant-specific: {sorted(overlap)}.",
+                    id="django_sqlite_tenants.E004",
+                )
+            )
+
+    if (
+        conf.TENANT_ROUTING_MODE == TenantRoutingMode.SUBFOLDER
+        and not conf.TENANT_SUBFOLDER_PREFIX.strip("/")
+    ):
+        messages.append(
+            checks.Error(
+                "TENANT_SUBFOLDER_PREFIX cannot be empty in SUBFOLDER mode.",
+                id="django_sqlite_tenants.E006",
             )
         )
 

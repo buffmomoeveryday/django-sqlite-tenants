@@ -1,6 +1,9 @@
+import importlib
+import os
 import re
 import threading
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 
@@ -76,6 +79,55 @@ def get_tenant_database_path(slug: str) -> Path:
     if path.parent != tenant_dir:
         raise ValidationError("Tenant database path escapes TENANTS_DB_FOLDER.")
     return path
+
+
+def _lock_file(handle: Any) -> None:
+    if os.name == "nt":
+        msvcrt = importlib.import_module("msvcrt")
+        handle.seek(0)
+        if not handle.read(1):
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        return
+
+    fcntl = importlib.import_module("fcntl")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_file(handle: Any) -> None:
+    if os.name == "nt":
+        msvcrt = importlib.import_module("msvcrt")
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    fcntl = importlib.import_module("fcntl")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def tenant_lifecycle_lock(slug: str) -> Iterator[None]:
+    """Serialize provisioning, migration, and purge for one tenant slug."""
+    slug = validate_tenant_slug(slug)
+    lock_directory = get_tenant_database_directory() / ".locks"
+    lock_directory.mkdir(parents=True, exist_ok=True)
+    lock_directory = lock_directory.resolve()
+    lock_path = (lock_directory / f"{slug}.lock").resolve()
+    if lock_path.parent != lock_directory:
+        raise ValidationError("Tenant lifecycle lock escapes TENANTS_DB_FOLDER.")
+
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(lock_path, flags, 0o600)
+    with os.fdopen(descriptor, "r+b") as handle:
+        _lock_file(handle)
+        try:
+            yield
+        finally:
+            _unlock_file(handle)
 
 
 def _database_config(path: Path) -> dict[str, Any]:
@@ -183,31 +235,32 @@ def create_tenant(
 ) -> TenantMixin:
     """Create shared tenant metadata and provision a fresh tenant database."""
     slug = validate_tenant_slug(slug)
-    path = get_tenant_database_path(slug)
     TenantModel = get_tenant_model()
 
-    if TenantModel.objects.using(DEFAULT_DB_ALIAS).filter(slug=slug).exists():
-        raise ValidationError(f"Tenant '{slug}' already exists.")
-    path = reserve_tenant_database(slug)
-    try:
-        alias = register_tenant_database(slug)
-        with tenant_context(slug):
-            call_command("migrate", database=alias, interactive=False, verbosity=0)
-        connections[alias].close()
-        with transaction.atomic(using=DEFAULT_DB_ALIAS):
-            tenant = TenantModel.objects.using(DEFAULT_DB_ALIAS).create(
-                slug=slug, name=name, **fields
-            )
-            if domain:
-                DomainModel = get_domain_model()
-                DomainModel.objects.using(DEFAULT_DB_ALIAS).create(
-                    tenant=tenant,
-                    domain=normalize_domain(domain),
-                    is_primary=True,
-                    is_active=True,
+    with tenant_lifecycle_lock(slug):
+        path = get_tenant_database_path(slug)
+        if TenantModel.objects.using(DEFAULT_DB_ALIAS).filter(slug=slug).exists():
+            raise ValidationError(f"Tenant '{slug}' already exists.")
+        path = reserve_tenant_database(slug)
+        try:
+            alias = register_tenant_database(slug)
+            with tenant_context(slug):
+                call_command("migrate", database=alias, interactive=False, verbosity=0)
+            connections[alias].close()
+            with transaction.atomic(using=DEFAULT_DB_ALIAS):
+                tenant = TenantModel.objects.using(DEFAULT_DB_ALIAS).create(
+                    slug=slug, name=name, **fields
                 )
-        return tenant
-    except Exception:
-        unregister_tenant_database(slug)
-        remove_tenant_database_files(path)
-        raise
+                if domain:
+                    DomainModel = get_domain_model()
+                    DomainModel.objects.using(DEFAULT_DB_ALIAS).create(
+                        tenant=tenant,
+                        domain=normalize_domain(domain),
+                        is_primary=True,
+                        is_active=True,
+                    )
+            return tenant
+        except Exception:
+            unregister_tenant_database(slug)
+            remove_tenant_database_files(path)
+            raise

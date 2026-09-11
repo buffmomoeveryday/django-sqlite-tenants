@@ -119,7 +119,8 @@ python manage.py migrate_tenant --tenant acme
 Existing databases are backed up through SQLite's online backup API before
 migration. Successful migrations remove the backup and maintenance mode. If a
 migration fails, the command continues with other tenants, exits non-zero, keeps
-the failed tenant in maintenance mode, and preserves `<slug>.sqlite3.bak`.
+the failed tenant in maintenance mode, and preserves `<slug>.sqlite3.bak` when
+backup creation completed successfully.
 
 Restore a backup only while all application workers that can access that tenant
 are stopped. Never replace a live WAL-mode database file. After restoring,
